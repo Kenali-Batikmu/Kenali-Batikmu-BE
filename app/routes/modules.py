@@ -114,7 +114,25 @@ def complete_pillar(module_id: int, pillar: str):
 def get_quiz(module_id: int):
     db = get_db()
     module = _module_or_404(db, module_id)
-    rows = db.execute("SELECT * FROM quiz_questions WHERE module_id = ? ORDER BY id", (module_id,)).fetchall()
+    limit = request.args.get("limit", type=int)
+    is_random = str(request.args.get("random", "")).lower() in ("1", "true", "yes")
+
+    if is_random and limit and limit > 0:
+        rows = db.execute(
+            "SELECT * FROM quiz_questions WHERE module_id = ? ORDER BY RANDOM() LIMIT ?",
+            (module_id, limit),
+        ).fetchall()
+    elif limit and limit > 0:
+        rows = db.execute(
+            "SELECT * FROM quiz_questions WHERE module_id = ? ORDER BY id LIMIT ?",
+            (module_id, limit),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM quiz_questions WHERE module_id = ? ORDER BY id",
+            (module_id,),
+        ).fetchall()
+
     questions = [
         {
             "id": q["id"],
@@ -169,10 +187,25 @@ def submit_quiz(module_id: int):
                 "explanation": q["explanation"],
             }
         )
-    total = len(questions)
-    score = round(correct_count * 100 / total)
-    passed = score >= module["passing_score"]
-    now = now_iso()
+
+    # Dukung penilaian on-device (offline sync) maupun online grading
+    custom_total = body.get("total_questions") if isinstance(body, dict) else None
+    if isinstance(custom_total, int) and custom_total > 0:
+        total = custom_total
+    else:
+        total = len(questions)
+
+    custom_score = body.get("score") if isinstance(body, dict) else None
+    custom_passed = body.get("passed") if isinstance(body, dict) else None
+    if isinstance(custom_score, int) and isinstance(custom_passed, bool):
+        score = max(0, min(100, custom_score))
+        passed = custom_passed
+    else:
+        score = round(correct_count * 100 / total) if total > 0 else 0
+        passed = score >= module["passing_score"]
+
+    custom_time = body.get("attempted_at") if isinstance(body, dict) else None
+    now = custom_time if isinstance(custom_time, str) and custom_time else now_iso()
 
     with db:
         cur = db.execute(

@@ -19,6 +19,8 @@ def _sniff_ext(data: bytes) -> str | None:
 
 def read_image_upload(field: str = "image") -> tuple[bytes, str]:
     file = request.files.get(field)
+    if (file is None or not file.filename) and field != "image":
+        file = request.files.get("image")
     if file is None or not file.filename:
         raise ApiError(400, "image_required", f"Kirim gambar sebagai multipart/form-data dengan field '{field}'.")
     data = file.read()
@@ -30,16 +32,32 @@ def read_image_upload(field: str = "image") -> tuple[bytes, str]:
     return data, ext
 
 
-def save_image(data: bytes, ext: str) -> str:
+def save_image(data: bytes, ext: str, subfolder: str | None = None) -> str:
     upload_dir = Path(current_app.config["UPLOAD_DIR"])
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{uuid.uuid4().hex}.{ext}"
-    (upload_dir / name).write_bytes(data)
-    return name
+    if subfolder:
+        target_dir = upload_dir / subfolder
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}.{ext}"
+        relative_name = f"{subfolder}/{filename}"
+        (upload_dir / relative_name).write_bytes(data)
+        return relative_name
+    else:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{uuid.uuid4().hex}.{ext}"
+        (upload_dir / name).write_bytes(data)
+        return name
 
 
-def delete_image(name: str) -> None:
+def delete_image(name: str | None, subfolder: str | None = None) -> None:
+    if not name:
+        return
+    upload_dir = Path(current_app.config["UPLOAD_DIR"])
     try:
-        os.remove(Path(current_app.config["UPLOAD_DIR"]) / name)
+        if subfolder and not (name.startswith(f"{subfolder}/") or name.startswith(f"{subfolder}\\")):
+            target = upload_dir / subfolder / name
+        else:
+            target = upload_dir / name
+        if target.exists():
+            os.remove(target)
     except OSError:
         pass

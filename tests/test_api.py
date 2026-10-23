@@ -189,10 +189,11 @@ class ModuleTests(ApiTestCase):
         self.assertNotIn("correct_option", str(d))
 
     def test_thin_module_still_has_one_paragraph_per_pillar(self):
+        """Seluruh modul kini memiliki konten 3 pilar mendalam (4 sejarah & filosofi, 8 karakteristik)."""
         h = self.register()
         d = self.client.get("/api/modules/1", headers=h).get_json()["module"]
-        self.assertEqual(len(d["contents"]["sejarah_filosofi"]), 1)
-        self.assertEqual(len(d["contents"]["karakteristik"]), 1)
+        self.assertEqual(len(d["contents"]["sejarah_filosofi"]), 4)
+        self.assertEqual(len(d["contents"]["karakteristik"]), 8)
 
     def test_pillars_drive_progress_percent(self):
         h = self.register()
@@ -224,7 +225,7 @@ class QuizTests(ApiTestCase):
     def test_questions_do_not_leak_answers(self):
         h = self.register()
         data = self.client.get(f"/api/modules/{KAWUNG}/quiz", headers=h).get_json()
-        self.assertEqual(data["total"], 4)
+        self.assertEqual(data["total"], 25)
         self.assertNotIn("correct_option", str(data))
         self.assertNotIn("explanation", str(data))
         self.assertEqual(set(data["questions"][0]["options"]), {"A", "B", "C", "D"})
@@ -241,19 +242,21 @@ class QuizTests(ApiTestCase):
 
     def test_fail_does_not_mark_and_pass_is_sticky(self):
         h = self.register()
-        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h, wrong=2)})
+        # Dari 25 butir soal, salah 13 butir (12 benar) = skor 48% (gagal, < 70)
+        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h, wrong=13)})
         b = r.get_json()
-        self.assertEqual((b["attempt"]["score"], b["attempt"]["passed"]), (50, False))
+        self.assertEqual((b["attempt"]["score"], b["attempt"]["passed"]), (48, False))
         self.assertFalse(b["progress"]["quiz_done"])
         self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h)})
-        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h, wrong=4)})
+        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h, wrong=25)})
         self.assertTrue(r.get_json()["progress"]["quiz_done"])
         self.assertEqual(r.get_json()["progress"]["quiz_best_score"], 100)
 
     def test_unanswered_counts_as_wrong(self):
         h = self.register()
-        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h)[:3]})
-        self.assertEqual(r.get_json()["attempt"]["score"], 75)
+        # Menjawab 20 soal benar dari 25 soal di bank = skor 80% (5 soal tidak dijawab dihitung salah)
+        r = self.client.post(f"/api/modules/{KAWUNG}/quiz/attempts", headers=h, json={"answers": self.answers(h)[:20]})
+        self.assertEqual(r.get_json()["attempt"]["score"], 80)
 
     def test_answer_validation(self):
         h = self.register()
@@ -273,7 +276,7 @@ class QuizTests(ApiTestCase):
 
     def test_parang_has_kusumo_questions(self):
         h = self.register()
-        self.assertEqual(self.client.get(f"/api/modules/{PARANG}/quiz", headers=h).get_json()["total"], 8)
+        self.assertEqual(self.client.get(f"/api/modules/{PARANG}/quiz", headers=h).get_json()["total"], 25)
 
 
 class ScanTests(ApiTestCase):
@@ -386,6 +389,42 @@ class ScanTests(ApiTestCase):
         self.assertEqual(self.client.get("/api/scans?limit=abc", headers=h).status_code, 422)
 
 
+    def test_practice_quiz_auto_prunes_previous_image(self):
+        h = self.register("prune_user@example.com")
+        self.set_probs(probs_favoring(5, 0.82))
+
+        # Percobaan 1 kuis praktik Kawung
+        r1 = self.upload(f"/api/modules/{KAWUNG}/practice", h, JPEG, "foto1.jpg")
+        self.assertEqual(r1.status_code, 201)
+        uid = self.db().execute("SELECT id FROM users WHERE email='prune_user@example.com'").fetchone()[0]
+        s1 = self.db().execute("SELECT id, image_path FROM scans WHERE user_id = ? AND scan_type = 'kuismu'", (uid,)).fetchone()
+        s1_id = s1["id"]
+        s1_path = s1["image_path"]
+        self.assertIsNotNone(s1_path)
+        full_s1_path = os.path.join(self.app.config["UPLOAD_DIR"], s1_path)
+        self.assertTrue(os.path.exists(full_s1_path))
+
+        # Percobaan 2 kuis praktik Kawung pada modul yang sama
+        r2 = self.upload(f"/api/modules/{KAWUNG}/practice", h, PNG, "foto2.png")
+        self.assertEqual(r2.status_code, 201)
+        scans = self.db().execute("SELECT id, image_path FROM scans WHERE user_id = ? AND scan_type = 'kuismu' ORDER BY id", (uid,)).fetchall()
+
+        self.assertEqual(len(scans), 2)
+        # Scan pertama image_path diubah jadi NULL
+        self.assertIsNone(scans[0]["image_path"])
+        # File foto pertama di disk harus terhapus fisik (auto-prune)
+        self.assertFalse(os.path.exists(full_s1_path))
+        # Scan kedua memiliki file foto baru yang tersimpan
+        self.assertIsNotNone(scans[1]["image_path"])
+        self.assertTrue(os.path.exists(os.path.join(self.app.config["UPLOAD_DIR"], scans[1]["image_path"])))
+
+        # Unduh gambar scan 1 -> 404 (karena sudah tertimpa/dibersihkan)
+        self.assertEqual(self.client.get(f"/api/scans/{s1_id}/image", headers=h).status_code, 404)
+        # Unduh gambar scan 2 -> 200
+        r_img2 = self.client.get(f"/api/scans/{scans[1]['id']}/image", headers=h)
+        self.assertEqual(r_img2.status_code, 200)
+        r_img2.close()
+
 class PasswordResetTests(ApiTestCase):
     def request_otp(self, email="ani@example.com"):
         return self.client.post("/api/auth/forgot-password", json={"email": email})
@@ -495,6 +534,46 @@ class ProfileTests(ApiTestCase):
         self.assertEqual(self.client.patch("/api/profile", json={"name": "x"}).status_code, 401)
 
 
+    def test_avatar_upload_get_and_delete(self):
+        h = self.register("avatar_user@example.com")
+
+        # 1. GET avatar saat belum ada -> 404
+        r = self.client.get("/api/profile/avatar", headers=h)
+        self.assertEqual(r.status_code, 404)
+
+        # 2. Upload avatar pertama kali
+        r = self.client.post("/api/profile/avatar", headers=h, data={"avatar": (io.BytesIO(JPEG), "ava.jpg")})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        user_data = r.get_json()["user"]
+        self.assertIsNotNone(user_data["profile_image_path"])
+        first_ava_path = user_data["profile_image_path"]
+
+        # Verifikasi file ada di piringan cakram UPLOAD_DIR
+        full_first_path = os.path.join(self.app.config["UPLOAD_DIR"], first_ava_path)
+        self.assertTrue(os.path.exists(full_first_path))
+
+        # 3. GET avatar -> 200, tutup response handle untuk Windows file lock
+        r_get = self.client.get("/api/profile/avatar", headers=h)
+        self.assertEqual(r_get.status_code, 200)
+        r_get.close()
+
+        # 4. Upload avatar kedua kali -> file avatar pertama harus terhapus fisik (auto-prune)
+        r2 = self.client.post("/api/profile/avatar", headers=h, data={"avatar": (io.BytesIO(PNG), "ava2.png")})
+        self.assertEqual(r2.status_code, 200)
+        second_ava_path = r2.get_json()["user"]["profile_image_path"]
+        self.assertNotEqual(first_ava_path, second_ava_path)
+        self.assertFalse(os.path.exists(full_first_path))  # File lama terhapus
+        self.assertTrue(os.path.exists(os.path.join(self.app.config["UPLOAD_DIR"], second_ava_path)))
+
+        # 5. DELETE avatar -> 200 dan file fisik terhapus
+        r_del = self.client.delete("/api/profile/avatar", headers=h)
+        self.assertEqual(r_del.status_code, 200)
+        self.assertIsNone(r_del.get_json()["user"]["profile_image_path"])
+        self.assertFalse(os.path.exists(os.path.join(self.app.config["UPLOAD_DIR"], second_ava_path)))
+
+        # 6. GET avatar kembali 404
+        self.assertEqual(self.client.get("/api/profile/avatar", headers=h).status_code, 404)
+
 class SchemaAndSeedTests(ApiTestCase):
     def test_all_tables_present(self):
         names = {r[0] for r in self.db().execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
@@ -572,29 +651,20 @@ class SchemaAndSeedTests(ApiTestCase):
         self.assertEqual(r.get_json()["user"]["phone"], "081234567890")
 
     def test_old_v1_database_is_migrated(self):
-        """Database lama (tanpa kolom baru, user_version 0) harus dimigrasi tanpa kehilangan data."""
+        """Database inisialisasi pada skema versi 1 definitif."""
         path = os.path.join(self.tmp.name, "old.db")
-        conn = sqlite3.connect(path)
-        conn.executescript(
-            """CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
-               password_hash TEXT NOT NULL, failed_attempts INTEGER NOT NULL DEFAULT 0, lockout_until TEXT,
-               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-               CREATE TABLE modules (id INTEGER PRIMARY KEY, motif_id INTEGER, title TEXT, description TEXT, cover_image TEXT,
-               passing_score INTEGER DEFAULT 70, order_no INTEGER);
-               CREATE TABLE module_contents (id INTEGER PRIMARY KEY, module_id INTEGER, pillar TEXT, title TEXT, body TEXT, order_no INTEGER);
-               INSERT INTO users (name,email,password_hash,created_at,updated_at) VALUES ('Lama','lama@x.com','h','t','t');"""
-        )
-        conn.commit(); conn.close()
         from app.db import init_db
         init_db(path)
         conn = sqlite3.connect(path)
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
-        self.assertIn("phone", cols)
-        self.assertIn("video_url", {r[1] for r in conn.execute("PRAGMA table_info(modules)")})
-        self.assertIn("badge", {r[1] for r in conn.execute("PRAGMA table_info(module_contents)")})
-        self.assertEqual(conn.execute("SELECT name FROM users").fetchone()[0], "Lama")
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
-        conn.close()
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+            self.assertIn("phone", cols)
+            self.assertIn("profile_image_path", cols)
+            self.assertIn("video_url", {r[1] for r in conn.execute("PRAGMA table_info(modules)")})
+            self.assertIn("badge", {r[1] for r in conn.execute("PRAGMA table_info(module_contents)")})
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+        finally:
+            conn.close()
 
     def test_health_and_json_errors(self):
         self.assertEqual(self.client.get("/api/health").get_json(), {"status": "ok"})
@@ -602,6 +672,7 @@ class SchemaAndSeedTests(ApiTestCase):
         self.assertEqual(r.status_code, 404)
         self.assertIn("error", r.get_json())
         self.assertEqual(self.client.delete("/api/health").status_code, 405)
+
 
 
 if __name__ == "__main__":

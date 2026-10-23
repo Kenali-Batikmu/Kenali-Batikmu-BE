@@ -28,11 +28,13 @@ MAX_PASSWORD_LENGTH = 128  # batas atas agar scrypt tidak dipakai untuk DoS
 
 
 def user_public(row) -> dict:
+    has_avatar = "profile_image_path" in row.keys() if hasattr(row, "keys") else False
     return {
         "id": row["id"],
         "name": row["name"],
         "email": row["email"],
         "phone": row["phone"],
+        "profile_image_path": row["profile_image_path"] if has_avatar else None,
         "created_at": row["created_at"],
     }
 

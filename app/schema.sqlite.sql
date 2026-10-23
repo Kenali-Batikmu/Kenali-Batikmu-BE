@@ -1,5 +1,5 @@
 -- ============================================================================
--- Kenali Batikmu - Skema Database (SQLite) - versi 2 (lihat SCHEMA_VERSION di db.py)
+-- Kenali Batikmu - Skema Database (SQLite) - versi 1 (lihat SCHEMA_VERSION di db.py)
 -- Waktu disimpan sebagai teks ISO-8601 UTC (contoh: 2026-10-10T05:30:00Z).
 -- Boolean disimpan sebagai INTEGER 0/1.
 -- PRAGMA foreign_keys bersifat per-koneksi: aktifkan lagi di setiap koneksi
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash   TEXT    NOT NULL,
     failed_attempts INTEGER NOT NULL DEFAULT 0,
     lockout_until   TEXT,
+    profile_image_path TEXT,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL
 );

@@ -129,9 +129,24 @@ def submit_practice(module_id: int):
     passed = fit >= module["passing_score"] / 100
     top = ranking[0]
 
-    image_name = uploads.save_image(data, ext)
+    # Kebijakan retensi kuis praktik: Hapus foto lama milik user di modul ini (maks 1 foto per modul)
+    old_scans = db.execute(
+        "SELECT id, image_path FROM scans WHERE user_id = ? AND module_id = ? AND scan_type = 'kuismu' AND image_path IS NOT NULL",
+        (g.user["id"], module_id),
+    ).fetchall()
+    for os_row in old_scans:
+        if os_row["image_path"]:
+            uploads.delete_image(os_row["image_path"])
+
+    image_name = uploads.save_image(data, ext, subfolder="practices")
     try:
         with db:
+            # Kosongkan image_path scan kuis lama di modul ini agar tidak mengarah ke file yang sudah dihapus
+            if old_scans:
+                db.execute(
+                    "UPDATE scans SET image_path = NULL WHERE user_id = ? AND module_id = ? AND scan_type = 'kuismu'",
+                    (g.user["id"], module_id),
+                )
             scan_id, created_at = _store_scan(
                 db, scan_type="kuismu", module_id=module_id, image_name=image_name, ranking=ranking,
                 confidence=top["probability"], fit_score=fit, passed=passed, elapsed_ms=elapsed_ms,

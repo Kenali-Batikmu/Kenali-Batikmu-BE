@@ -1,11 +1,12 @@
 import re
 
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request, send_from_directory
 
 from ..db import IntegrityError, get_db
 from ..errors import ApiError
 from ..security import auth_required, hash_password, now_iso
 from .auth import _EMAIL_RE, MAX_PASSWORD_LENGTH, user_public
+from ..services import uploads
 
 bp = Blueprint("profile", __name__, url_prefix="/api/profile")
 
@@ -101,3 +102,62 @@ def update_profile():
             raise ApiError(409, "email_taken", "Email sudah terdaftar.", field="email")
     fresh = get_db().execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
     return jsonify({"user": user_public(fresh)})
+
+
+# --- Foto Profil (Avatar) -----------------------------------------------------
+@bp.post("/avatar")
+@auth_required
+def upload_avatar():
+    """Unggah foto profil pengguna (avatar).
+    Jika pengguna sudah memiliki foto avatar sebelumnya di server, foto lama otomatis dihapus.
+    """
+    data, ext = uploads.read_image_upload("avatar")
+    db = get_db()
+    user_id = g.user["id"]
+
+    old_row = db.execute("SELECT profile_image_path FROM users WHERE id = ?", (user_id,)).fetchone()
+    if old_row and old_row["profile_image_path"]:
+        uploads.delete_image(old_row["profile_image_path"])
+
+    image_name = uploads.save_image(data, ext, subfolder="avatars")
+    now = now_iso()
+    with db:
+        db.execute(
+            "UPDATE users SET profile_image_path = ?, updated_at = ? WHERE id = ?",
+            (image_name, now, user_id),
+        )
+
+    fresh = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return jsonify({"user": user_public(fresh)}), 200
+
+
+@bp.get("/avatar")
+@auth_required
+def get_avatar():
+    """Ambil file foto profil pengguna aktif."""
+    user_id = g.user["id"]
+    row = get_db().execute("SELECT profile_image_path FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row or not row["profile_image_path"]:
+        raise ApiError(404, "avatar_not_found", "Foto profil tidak tersedia.")
+
+    return send_from_directory(current_app.config["UPLOAD_DIR"], row["profile_image_path"])
+
+
+@bp.delete("/avatar")
+@auth_required
+def delete_avatar():
+    """Hapus foto profil pengguna aktif dari server."""
+    user_id = g.user["id"]
+    db = get_db()
+    row = db.execute("SELECT profile_image_path FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row and row["profile_image_path"]:
+        uploads.delete_image(row["profile_image_path"])
+        now = now_iso()
+        with db:
+            db.execute(
+                "UPDATE users SET profile_image_path = NULL, updated_at = ? WHERE id = ?",
+                (now, user_id),
+            )
+
+    fresh = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return jsonify({"user": user_public(fresh)}), 200

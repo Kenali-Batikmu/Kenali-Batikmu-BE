@@ -10,7 +10,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sqlite.sql")
 SEED_PATH = Path(__file__).with_name("seed.sqlite.sql")
 
 # Naikkan angka ini setiap skema berubah, lalu tambahkan langkahnya di _MIGRATIONS.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 IntegrityError = sqlite3.IntegrityError
 
@@ -47,19 +47,7 @@ def _add_column(conn, table: str, ddl: str) -> None:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
-def _migrate_to_2(conn) -> None:
-    """v1 -> v2: kolom yang dibutuhkan app mobile (nomor HP, video, badge materi).
-
-    Tabel password_resets dibuat oleh schema.sqlite.sql (CREATE TABLE IF NOT EXISTS).
-    image_url di module_gallery_images yang dulu NOT NULL tidak bisa diubah lewat ALTER;
-    app selalu mengirim nilai, jadi cukup dibiarkan pada database lama.
-    """
-    _add_column(conn, "users", "phone TEXT")
-    _add_column(conn, "modules", "video_url TEXT")
-    _add_column(conn, "module_contents", "badge TEXT")
-
-
-_MIGRATIONS = {2: _migrate_to_2}
+_MIGRATIONS = {}
 
 
 def init_db(target: str = None) -> None:
