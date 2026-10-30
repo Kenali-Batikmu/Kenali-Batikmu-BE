@@ -1,75 +1,114 @@
-import logging
+from __future__ import annotations
+
 import os
-import secrets
-from pathlib import Path
+from dataclasses import dataclass
+from functools import lru_cache
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+from dotenv import load_dotenv
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(BASE_DIR / ".env")
-except ImportError:
-    pass
-
-log = logging.getLogger(__name__)
+load_dotenv()
 
 
-def _int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except ValueError:
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
         return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _secret_key() -> str:
-    key = os.environ.get("SECRET_KEY", "")
-    if key and key != "ganti-dengan-string-acak-panjang":
-        return key
-    log.warning(
-        "SECRET_KEY belum diset: memakai kunci acak sementara. Token login akan "
-        "tidak valid setiap server restart. Set SECRET_KEY di .env untuk produksi."
+def _as_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Variabel lingkungan {name} harus berupa angka bulat.") from exc
+
+
+@dataclass(frozen=True)
+class Settings:
+    # --- Supabase ---
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+
+    # --- Token ---
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_minutes: int = 30
+    refresh_token_days: int = 30
+
+    # --- Keamanan login ---
+    max_failed_logins: int = 5
+    lockout_minutes: int = 15
+
+    # --- Lupa sandi (OTP) ---
+    otp_length: int = 4  # sama dengan 4 kotak OTP di aplikasi mobile
+    otp_ttl_minutes: int = 5
+    otp_verified_ttl_minutes: int = 10
+    otp_max_attempts: int = 5
+    otp_resend_seconds: int = 60
+
+    # --- Email (SMTP) ---
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    app_name: str = "Kenali Batikmu"
+    # HANYA untuk pengembangan: mengembalikan OTP di respons API.
+    expose_otp_in_response: bool = False
+
+    # --- Lain-lain ---
+    cors_origins: tuple[str, ...] = ()
+    avatars_bucket: str = "avatars"
+    practices_bucket: str = "practices"
+    max_upload_bytes: int = 5 * 1024 * 1024
+
+    @property
+    def smtp_configured(self) -> bool:
+        return bool(self.smtp_host and (self.smtp_from or self.smtp_user))
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    jwt_secret = os.getenv("JWT_SECRET", "").strip()
+
+    missing = [
+        name
+        for name, value in (
+            ("SUPABASE_URL", url),
+            ("SUPABASE_SERVICE_ROLE_KEY", service_key),
+            ("JWT_SECRET", jwt_secret),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Variabel lingkungan wajib belum diisi: " + ", ".join(missing) + ". Salin .env.example menjadi .env."
+        )
+    if len(jwt_secret) < 32:
+        raise RuntimeError("JWT_SECRET minimal 32 karakter. Buat dengan: python -c \"import secrets; print(secrets.token_urlsafe(48))\"")
+
+    origins = tuple(o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip())
+
+    return Settings(
+        supabase_url=url,
+        supabase_service_role_key=service_key,
+        jwt_secret=jwt_secret,
+        access_token_minutes=_as_int("ACCESS_TOKEN_MINUTES", 30),
+        refresh_token_days=_as_int("REFRESH_TOKEN_DAYS", 30),
+        max_failed_logins=_as_int("MAX_FAILED_LOGINS", 5),
+        lockout_minutes=_as_int("LOCKOUT_MINUTES", 15),
+        otp_length=_as_int("OTP_LENGTH", 4),
+        otp_ttl_minutes=_as_int("OTP_TTL_MINUTES", 5),
+        smtp_host=os.getenv("SMTP_HOST", "").strip(),
+        smtp_port=_as_int("SMTP_PORT", 587),
+        smtp_user=os.getenv("SMTP_USER", "").strip(),
+        smtp_password=os.getenv("SMTP_PASSWORD", ""),
+        smtp_from=os.getenv("SMTP_FROM", "").strip(),
+        app_name=os.getenv("APP_NAME", "Kenali Batikmu").strip() or "Kenali Batikmu",
+        expose_otp_in_response=_as_bool(os.getenv("EXPOSE_OTP_IN_RESPONSE")),
+        cors_origins=origins,
     )
-    return secrets.token_urlsafe(48)
-
-
-class Config:
-    SECRET_KEY = _secret_key()
-
-    DATABASE = os.environ.get("DATABASE", str(Path(__file__).resolve().parent / "kenali_batikmu.db"))
-    UPLOAD_DIR = os.environ.get("UPLOAD_DIR", str(BASE_DIR / "uploads"))
-
-    MAX_CONTENT_LENGTH = _int("MAX_UPLOAD_MB", 16) * 1024 * 1024  # foto kamera HP bisa > 8 MB
-
-    TOKEN_TTL_HOURS = _int("TOKEN_TTL_HOURS", 24)
-    TOKEN_TTL_REMEMBER_DAYS = _int("TOKEN_TTL_REMEMBER_DAYS", 30)
-    MIN_PASSWORD_LENGTH = 8
-    MAX_FAILED_ATTEMPTS = _int("MAX_FAILED_ATTEMPTS", 5)
-    LOCKOUT_MINUTES = _int("LOCKOUT_MINUTES", 15)
-
-    CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
-
-    AUTO_SEED = os.environ.get("AUTO_SEED", "1") == "1"
-    # Akun demo yang dulu ada di app (sekar@batikmu.id, kenalibatikmu@gmail.com).
-    # Password-nya publik: matikan (0) di produksi.
-    SEED_DEMO_USERS = os.environ.get("SEED_DEMO_USERS", "0") == "1"
-
-    # Lupa kata sandi (OTP 4 digit, sama dengan UI app)
-    OTP_TTL_MINUTES = _int("OTP_TTL_MINUTES", 5)
-    OTP_MAX_ATTEMPTS = _int("OTP_MAX_ATTEMPTS", 5)
-    OTP_RESEND_SECONDS = _int("OTP_RESEND_SECONDS", 30)
-    RESET_TOKEN_TTL_MINUTES = _int("RESET_TOKEN_TTL_MINUTES", 10)
-    # Tanpa SMTP, OTP dikembalikan di respons API (mode demo, seperti "Mode Demo" di app).
-    # WAJIB 0 di produksi.
-    ALLOW_DEMO_OTP = os.environ.get("ALLOW_DEMO_OTP", "0") == "1"
-
-    SMTP_HOST = os.environ.get("SMTP_HOST", "")
-    SMTP_PORT = _int("SMTP_PORT", 587)
-    SMTP_USER = os.environ.get("SMTP_USER", "")
-    SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-    SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls")  # starttls | ssl | none
-    SMTP_FROM = os.environ.get("SMTP_FROM", "") or os.environ.get("SMTP_USER", "")
-
-    SCORE_VERY_SIMILAR = 0.70
-    SCORE_FAIRLY_SIMILAR = 0.50
-    UNIVERSAL_PASS_THRESHOLD = 0.70

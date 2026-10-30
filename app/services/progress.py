@@ -1,102 +1,72 @@
-from ..security import now_iso
+from __future__ import annotations
 
-PILLAR_COLUMN = {
-    "history": "history_done",
-    "character": "character_done",
-    "gallery": "gallery_done",
-}
-COMPONENTS = ("history_done", "character_done", "gallery_done", "quiz_done", "practice_done")
-PROGRESS_FIELDS = ("status", "progress_percent", *COMPONENTS, "completed_at", "last_accessed_at")
+from datetime import datetime
+from typing import Any, Mapping
+
+from supabase import Client
+
+from ..database import first
+from ..domain import merge_progress
+
+PROGRESS_TABLE = "user_module_progress"
+PROGRESS_COLUMNS = (
+    "module_id,status,progress_percent,history_done,character_done,gallery_done,quiz_done,practice_done,"
+    "quiz_score,practice_score,passing_score,is_passed,completed_at,last_accessed_at,synced_at"
+)
+ATTEMPT_COLUMNS = "id,module_id,score,passed,total_questions,attempted_at,client_ref,synced_at"
+PRACTICE_COLUMNS = "id,module_id,scan_type,top_motif_id,image_path,confidence,fit_score,passed,created_at,synced_at"
 
 
-def _ensure_row(db, user_id: int, module_id: int, now: str) -> None:
-    db.execute(
-        "INSERT INTO user_module_progress (user_id, module_id, last_accessed_at) VALUES (?, ?, ?) ON CONFLICT (user_id, module_id) DO NOTHING",
-        (user_id, module_id, now),
+def list_progress(db: Client, user_id: int, since: datetime | None = None) -> list[dict[str, Any]]:
+    q = db.table(PROGRESS_TABLE).select(PROGRESS_COLUMNS).eq("user_id", user_id)
+    if since is not None:
+        q = q.gt("synced_at", since.isoformat())
+    return q.order("module_id").execute().data or []
+
+
+def list_quiz_attempts(
+    db: Client,
+    user_id: int,
+    module_id: int | None = None,
+    since: datetime | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    q = db.table("quiz_attempts").select(ATTEMPT_COLUMNS).eq("user_id", user_id)
+    if module_id is not None:
+        q = q.eq("module_id", module_id)
+    if since is not None:
+        q = q.gt("synced_at", since.isoformat())
+    return q.order("id", desc=True).limit(limit).execute().data or []
+
+
+def list_practice_results(
+    db: Client,
+    user_id: int,
+    module_id: int | None = None,
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
+    q = db.table("scans").select(PRACTICE_COLUMNS).eq("user_id", user_id).eq("scan_type", "kuismu")
+    if module_id is not None:
+        q = q.eq("module_id", module_id)
+    if since is not None:
+        q = q.gt("synced_at", since.isoformat())
+    return q.order("module_id").execute().data or []
+
+
+def merge_and_save_progress(
+    db: Client,
+    user_id: int,
+    module_id: int,
+    incoming: Mapping[str, Any],
+    passing_score: int,
+    now: datetime,
+) -> dict[str, Any]:
+    """Baca progres server, gabungkan dengan kiriman klien, simpan (upsert per user+modul)."""
+    existing = first(
+        db.table(PROGRESS_TABLE).select("*").eq("user_id", user_id).eq("module_id", module_id).limit(1).execute()
     )
-
-
-def best_scores(db, user_id: int, module_id: int | None = None) -> dict[int, dict]:
-    """Skor terbaik per modul: kuis teori (0-100) dan kuis praktik (fit_score x 100).
-
-    Dipakai app untuk menampilkan nilai, bukan angka bawaan. Modul yang belum pernah
-    dikerjakan tidak ada di hasil.
-    """
-    extra, params = ("", [user_id]) if module_id is None else (" AND module_id = ?", [user_id, module_id])
-    out: dict[int, dict] = {}
-    for r in db.execute(
-        f"SELECT module_id, MAX(score) AS s FROM quiz_attempts WHERE user_id = ?{extra} GROUP BY module_id", params
-    ):
-        out.setdefault(r["module_id"], {})["quiz_best_score"] = r["s"]
-    for r in db.execute(
-        f"""SELECT module_id, MAX(fit_score) AS s FROM scans
-             WHERE user_id = ? AND scan_type = 'kuismu'{extra} GROUP BY module_id""",
-        params,
-    ):
-        if r["s"] is not None:
-            out.setdefault(r["module_id"], {})["practice_best_score"] = round(r["s"] * 100)
-    return out
-
-
-def _with_scores(progress: dict, scores: dict | None) -> dict:
-    progress["quiz_best_score"] = (scores or {}).get("quiz_best_score")
-    progress["practice_best_score"] = (scores or {}).get("practice_best_score")
-    return progress
-
-
-def get_progress(db, user_id: int, module_id: int) -> dict:
-    row = db.execute(
-        "SELECT * FROM user_module_progress WHERE user_id = ? AND module_id = ?", (user_id, module_id)
-    ).fetchone()
-    scores = best_scores(db, user_id, module_id).get(module_id)
-    if row is None:
-        return _with_scores(empty_progress(), scores)
-    return _with_scores(serialize(row), scores)
-
-
-def empty_progress() -> dict:
-    out = {"status": "not_started", "progress_percent": 0, "completed_at": None, "last_accessed_at": None}
-    out.update({c: False for c in COMPONENTS})
-    return out
-
-
-def serialize(row) -> dict:
-    out = {k: row[k] for k in PROGRESS_FIELDS}
-    for c in COMPONENTS:
-        out[c] = bool(out[c])
-    return out
-
-
-def touch(db, user_id: int, module_id: int) -> None:
-    now = now_iso()
-    _ensure_row(db, user_id, module_id, now)
-    db.execute(
-        "UPDATE user_module_progress SET last_accessed_at = ? WHERE user_id = ? AND module_id = ?",
-        (now, user_id, module_id),
-    )
-
-
-def mark_done(db, user_id: int, module_id: int, column: str) -> dict:
-    if column not in COMPONENTS:
-        raise ValueError(f"kolom progres tidak dikenal: {column}")
-    now = now_iso()
-    _ensure_row(db, user_id, module_id, now)
-    db.execute(
-        f"UPDATE user_module_progress SET {column} = 1 WHERE user_id = ? AND module_id = ?",
-        (user_id, module_id),
-    )
-    row = db.execute(
-        "SELECT * FROM user_module_progress WHERE user_id = ? AND module_id = ?", (user_id, module_id)
-    ).fetchone()
-
-    done = sum(1 for c in COMPONENTS if row[c])
-    percent = done * 20
-    status = "completed" if percent >= 100 else ("in_progress" if percent > 0 else "not_started")
-    completed_at = row["completed_at"] or (now if status == "completed" else None)
-    db.execute(
-        """UPDATE user_module_progress
-              SET progress_percent = ?, status = ?, completed_at = ?, last_accessed_at = ?
-            WHERE user_id = ? AND module_id = ?""",
-        (percent, status, completed_at, now, user_id, module_id),
-    )
-    return get_progress(db, user_id, module_id)
+    row = merge_progress(existing, incoming, passing_score, now)
+    row["user_id"] = user_id
+    row["module_id"] = module_id
+    db.table(PROGRESS_TABLE).upsert(row, on_conflict="user_id,module_id").execute()
+    return row

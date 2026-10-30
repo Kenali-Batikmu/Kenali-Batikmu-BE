@@ -1,8 +1,5 @@
 .env
-.venv/
 __pycache__/
-*.db
-*.db-wal
-*.db-shm
-uploads/*
-!uploads/.gitkeep
+*.pyc
+.venv/
+.pytest_cache/
